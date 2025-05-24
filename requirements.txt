@@ -1,0 +1,9 @@
+yfinance
+ta
+pandas
+scikit-learn
+streamlit
+snscrape
+transformers
+torch
+xgboost
