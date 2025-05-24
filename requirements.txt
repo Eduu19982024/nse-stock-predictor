@@ -1,9 +1,10 @@
 yfinance
-ta
 pandas
+numpy
+ta
 scikit-learn
+xgboost
 streamlit
 snscrape
 transformers
 torch
-xgboost
