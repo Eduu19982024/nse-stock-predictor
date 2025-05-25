@@ -2,13 +2,20 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import ta
+import streamlit as st
+from datetime import datetime
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error, accuracy_score
 from xgboost import XGBClassifier, XGBRegressor
-import streamlit as st
-import snscrape.modules.twitter as sntwitter
 from transformers import pipeline
+from snscrape.modules.twitter import TwitterSearchScraper
+from functools import lru_cache
 
+# -------------------- UI Setup -------------------- #
+st.set_page_config(page_title="Stock Movement Predictor", layout="wide")
+st.title("📈 Stock Price Movement Predictor with Sentiment")
+
+# -------------------- Stock List -------------------- #
 nse_symbols = [
     # Nifty 50 stocks
     "RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS",
@@ -38,7 +45,11 @@ nse_symbols = [
     "ASHOKLEY.NS", "HINDZINC.NS", "TORNTPOWER.NS"
 ]
 
+selected_stock = st.selectbox("Select a stock to analyze:", nse_symbols)
+days_ahead = st.slider("Prediction Horizon (days):", 1, 10, 3)
 
+# -------------------- Data Fetch -------------------- #
+@st.cache_data
 def get_stock_data(ticker):
     try:
         df = yf.download(ticker, period='6mo', interval='1d', progress=False)
@@ -56,22 +67,26 @@ def add_features(df):
     df['vwap'] = (df['Close'] * df['Volume']).cumsum() / df['Volume'].cumsum()
     return df.dropna()
 
+# -------------------- Sentiment -------------------- #
+@lru_cache(maxsize=50)
 def get_sentiment_score(stock_name):
     try:
-        tweets = sntwitter.TwitterSearchScraper(f'{stock_name} stock since:2025-05-18').get_items()
+        tweets = TwitterSearchScraper(f'{stock_name} stock since:2025-05-18').get_items()
         text_data = [tweet.content for tweet in list(tweets)[:30]]
         sentiment_pipeline = pipeline("sentiment-analysis", model="ProsusAI/finbert")
         results = sentiment_pipeline(text_data)
         scores = [1 if r['label'] == 'positive' else -1 if r['label'] == 'negative' else 0 for r in results]
-        return sum(scores) / len(scores) if scores else 0
+        return round(sum(scores) / len(scores), 2) if scores else 0
     except:
         return 0
 
+# -------------------- Prepare Dataset -------------------- #
 def prepare_targets(df, days):
     df['target_dir'] = (df['Close'].shift(-days) > df['Close']).astype(int)
     df['target_pct'] = (df['Close'].shift(-days) - df['Close']) / df['Close'] * 100
     return df.dropna()
 
+# -------------------- Model Training -------------------- #
 def train_models(df):
     features = ['rsi', 'ema', 'macd', 'sma10', 'sma50', 'bbp', 'vwap', 'sentiment']
     X = df[features]
@@ -92,43 +107,31 @@ def train_models(df):
     acc = accuracy_score(y_class_test, y_pred_class)
     mae = mean_absolute_error(y_reg_test, y_pred_reg)
 
-    last_input = df[features].iloc[-1:].values
-    dir_prob = model_class.predict_proba(last_input)[0][1]
-    direction = "↑" if dir_prob >= 0.5 else "↓"
-    pct_pred = model_reg.predict(last_input)[0]
+    return model_class, model_reg, acc, mae
 
-    return direction, pct_pred, dir_prob, acc, mae
+# -------------------- Run Analysis -------------------- #
+if selected_stock:
+    df = get_stock_data(selected_stock)
 
-def main():
-    st.title("📈 NSE Stock Forecast (Direction + % Movement)")
-    days = st.slider("Days Ahead to Predict", 1, 10, 5)
-
-    results = []
-
-    for symbol in nse_symbols:
-        df = get_stock_data(symbol)
-        if df.empty: continue
+    if not df.empty:
         df = add_features(df)
-        sentiment = get_sentiment_score(symbol.split('.')[0])
+        sentiment = get_sentiment_score(selected_stock.split('.')[0])
         df['sentiment'] = sentiment
-        df = prepare_targets(df, days)
-        if df.empty: continue
+        df = prepare_targets(df, days_ahead)
 
-        try:
-            direction, pct_pred, prob, acc, mae = train_models(df)
-            results.append({
-                "Stock": symbol,
-                "Direction": direction,
-                "Predicted %": round(pct_pred, 2),
-                "Confidence": f"{round(prob*100, 1)}%",
-                "Sentiment": round(sentiment, 2),
-                "Accuracy": round(acc*100, 2),
-                "MAE": round(mae, 2)
-            })
-        except:
-            continue
+        model_class, model_reg, acc, mae = train_models(df)
+        latest_data = df.iloc[-1:][['rsi', 'ema', 'macd', 'sma10', 'sma50', 'bbp', 'vwap', 'sentiment']]
+        prediction_class = model_class.predict(latest_data)[0]
+        prediction_reg = model_reg.predict(latest_data)[0]
 
-    st.dataframe(pd.DataFrame(results).sort_values(by='Predicted %', ascending=False))
+        # -------------------- Display Results -------------------- #
+        st.subheader(f"📊 Prediction for {selected_stock}")
+        st.write(f"**Sentiment Score:** {sentiment}")
+        st.metric("Probability of Rise (Classification)", "Up" if prediction_class == 1 else "Down")
+        st.metric("Expected % Change (Regression)", f"{prediction_reg:.2f}%")
+        st.metric("Model Accuracy", f"{acc:.2%}")
+        st.metric("MAE of Regression", f"{mae:.2f}%")
 
-if __name__ == '__main__':
-    main()
+        st.line_chart(df['Close'], use_container_width=True)
+    else:
+        st.warning("Unable to fetch stock data. Try a different stock.")
